@@ -1,6 +1,15 @@
-# Keyboard Language Guard — macOS MVP v4
+# Keyboard Language Guard — macOS
 
 The app detects Hebrew/English text typed with the wrong keyboard layout and offers **Replace**, **Copy**, or **Ignore**. All analysis happens locally; typed text is not sent to a server.
+
+## What changed in v5
+
+- **Privacy: password fields are ignored.** Keystrokes typed into a macOS secure text field are never captured or buffered.
+- **Settings screen** in the menu bar (**הגדרות…**): toggle detection, choose detection sensitivity (high / balanced / strict), turn secure-field protection on/off, and adjust the typing-pause delay. Settings persist between launches.
+- **First-run welcome screen** that explains the privacy model and the required permissions.
+- **Centralized configuration** (`config.py`) with settings saved to `~/Library/Application Support/KeyboardLanguageGuard/settings.json`.
+- **More accurate detection**: a suggestion now requires at least two words and a minimum confidence in the corrected text, reducing false positives.
+- **Proper test suite** runnable with `pytest`.
 
 ## What changed in v3
 
@@ -92,11 +101,16 @@ Click **Replace** to replace the detected phrase in Notes. If you typed more tex
 
 Click **Copy** to keep the original text untouched and place the corrected sentence on the clipboard.
 
-Run the core tests with:
+Run the tests with:
 
 ```bash
-python test_core.py
+pip install -r requirements-dev.txt
+pytest
 ```
+
+## Adjusting settings
+
+Open the menu-bar icon (`⌨︎`) and choose **הגדרות…** to change detection sensitivity, the typing-pause delay, secure-field protection, and whether detection is active. Your choices are saved and restored on the next launch.
 
 ## Current limitations
 
@@ -105,7 +119,6 @@ python test_core.py
 - Clicking the suggestion necessarily activates it momentarily; the app then returns focus to the original editor before replacing.
 - Mouse clicks that move the caret to a different location are not tracked yet. Ignore the suggestion if you moved the caret after it appeared.
 - The build normally targets the architecture of the Mac/Python used to create it. Early testers should use the same Mac architecture; later releases can provide Intel and Apple Silicon builds separately.
-- Before broad public distribution, password-field exclusion and a clearer first-run privacy screen should be added and tested.
 
 ## Upload for testers
 

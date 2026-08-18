@@ -1,0 +1,10 @@
+[project]
+name = "keyboard-language-guard"
+version = "0.5.0"
+description = "Detect Hebrew/English text typed with the wrong keyboard layout and offer a fix (macOS)."
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q"

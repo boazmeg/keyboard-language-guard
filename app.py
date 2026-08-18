@@ -3,12 +3,15 @@ import platform
 import threading
 import time
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk
 
 import pyperclip
 from pynput import keyboard, mouse
 
+from config import SENSITIVITY_PRESETS, Settings
 from detector import detect_wrong_layout
+from mac_accessibility import is_secure_field_focused
 
 try:
     import objc
@@ -24,11 +27,6 @@ except ImportError:
     NSObject = object
 
 MAX_BUFFER = 220
-MIN_CHECK_CHARS = 8
-COOLDOWN_SECONDS = 4
-IDLE_CHECK_MS = 1400
-PUNCTUATION_CHECK_MS = 850
-ENTER_CHECK_MS = 350
 POPUP_WIDTH = 500
 POPUP_HEIGHT = 205
 
@@ -46,19 +44,25 @@ if objc:
             self.guard.toggle_enabled()
 
         @objc.IBAction
+        def settings_(self, sender):
+            self.guard.root.after(0, self.guard.show_settings)
+
+        @objc.IBAction
         def quit_(self, sender):
             self.guard.root.after(0, self.guard.quit)
 
 
 class LanguageGuard:
     def __init__(self):
+        self.settings = Settings.load()
         self.buffer = ''
         self.lock = threading.RLock()
         self.last_alert_at = 0.0
         self.alert_open = False
         self.suppress_input = False
-        self.enabled = True
+        self.enabled = self.settings.enabled
         self.pending_check_id = 0
+        self.settings_window = None
         self.controller = keyboard.Controller()
         self.mouse_controller = mouse.Controller()
         self.is_mac = platform.system() == 'Darwin'
@@ -93,6 +97,13 @@ class LanguageGuard:
             menu.addItem_(self.toggle_menu_item)
             menu.addItem_(NSMenuItem.separatorItem())
 
+            settings_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                'הגדרות…', 'settings:', ','
+            )
+            settings_item.setTarget_(self.menu_delegate)
+            menu.addItem_(settings_item)
+            menu.addItem_(NSMenuItem.separatorItem())
+
             quit_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
                 'סגור את Keyboard Language Guard', 'quit:', 'q'
             )
@@ -108,6 +119,8 @@ class LanguageGuard:
             self.buffer = ''
             self.pending_check_id += 1
             enabled = self.enabled
+        self.settings.enabled = enabled
+        self._save_settings_safely()
         if self.toggle_menu_item is not None:
             self.toggle_menu_item.setTitle_('השהה זיהוי' if enabled else 'הפעל זיהוי')
         if self.status_item is not None:
@@ -120,6 +133,234 @@ class LanguageGuard:
             pass
         self.root.quit()
         self.root.destroy()
+
+    def _save_settings_safely(self):
+        try:
+            self.settings.save()
+        except Exception as exc:
+            print(f'Could not save settings: {exc}')
+
+    def _bring_window_to_front(self, win):
+        win.lift()
+        win.attributes('-topmost', True)
+        if self.is_mac:
+            try:
+                from AppKit import (
+                    NSApplication,
+                    NSApplicationActivateIgnoringOtherApps,
+                )
+                NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+            except Exception:
+                pass
+
+    def show_settings(self):
+        if self.settings_window is not None and tk.Toplevel.winfo_exists(
+            self.settings_window
+        ):
+            self._bring_window_to_front(self.settings_window)
+            return
+
+        win = tk.Toplevel(self.root)
+        self.settings_window = win
+        win.title('הגדרות · Keyboard Language Guard')
+        win.configure(bg='#F7F9FF')
+        win.resizable(False, False)
+
+        enabled_var = tk.BooleanVar(value=self.enabled)
+        secure_var = tk.BooleanVar(value=self.settings.ignore_secure_fields)
+        sensitivity_var = tk.StringVar(value=self.settings.sensitivity_label())
+        idle_var = tk.IntVar(value=self.settings.idle_check_ms)
+
+        pad = {'padx': 18, 'pady': 6}
+
+        tk.Label(
+            win,
+            text='הגדרות',
+            bg='#F7F9FF',
+            fg='#25304A',
+            font=('Arial', 16, 'bold'),
+        ).grid(row=0, column=0, sticky='e', **pad)
+
+        tk.Checkbutton(
+            win,
+            text='זיהוי פעיל',
+            variable=enabled_var,
+            bg='#F7F9FF',
+            font=('Arial', 12),
+            anchor='e',
+        ).grid(row=1, column=0, sticky='ew', **pad)
+
+        tk.Checkbutton(
+            win,
+            text='התעלם משדות סיסמה (מומלץ)',
+            variable=secure_var,
+            bg='#F7F9FF',
+            font=('Arial', 12),
+            anchor='e',
+        ).grid(row=2, column=0, sticky='ew', **pad)
+
+        sensitivity_frame = tk.LabelFrame(
+            win,
+            text='רגישות זיהוי',
+            bg='#F7F9FF',
+            fg='#25304A',
+            font=('Arial', 12, 'bold'),
+        )
+        sensitivity_frame.grid(row=3, column=0, sticky='ew', **pad)
+        labels = {
+            'high': 'גבוהה (יותר התרעות)',
+            'balanced': 'מאוזנת',
+            'strict': 'קפדנית (פחות התרעות)',
+        }
+        for name in ('high', 'balanced', 'strict'):
+            tk.Radiobutton(
+                sensitivity_frame,
+                text=labels[name],
+                value=name,
+                variable=sensitivity_var,
+                bg='#F7F9FF',
+                font=('Arial', 11),
+                anchor='e',
+            ).pack(fill='x', padx=10, pady=2)
+
+        tk.Label(
+            win,
+            text='השהיית זיהוי (מילישניות)',
+            bg='#F7F9FF',
+            fg='#25304A',
+            font=('Arial', 12),
+        ).grid(row=4, column=0, sticky='e', **pad)
+        tk.Scale(
+            win,
+            from_=600,
+            to=2500,
+            resolution=50,
+            orient='horizontal',
+            variable=idle_var,
+            bg='#F7F9FF',
+            highlightthickness=0,
+            length=260,
+        ).grid(row=5, column=0, sticky='ew', **pad)
+
+        buttons = tk.Frame(win, bg='#F7F9FF')
+        buttons.grid(row=6, column=0, sticky='ew', **pad)
+
+        def save_and_close():
+            self.settings.enabled = enabled_var.get()
+            self.settings.ignore_secure_fields = secure_var.get()
+            self.settings.set_sensitivity(sensitivity_var.get())
+            self.settings.idle_check_ms = int(idle_var.get())
+            self._save_settings_safely()
+
+            with self.lock:
+                self.enabled = self.settings.enabled
+                self.buffer = ''
+                self.pending_check_id += 1
+            if self.toggle_menu_item is not None:
+                self.toggle_menu_item.setTitle_(
+                    'השהה זיהוי' if self.enabled else 'הפעל זיהוי'
+                )
+            if self.status_item is not None:
+                self.status_item.button().setTitle_('⌨︎' if self.enabled else '⌨︎⏸')
+            win.destroy()
+            self.settings_window = None
+
+        def cancel():
+            win.destroy()
+            self.settings_window = None
+
+        tk.Button(
+            buttons,
+            text='שמור',
+            command=save_and_close,
+            bg='#4F6BED',
+            fg='white',
+            activebackground='#3F58C7',
+            activeforeground='white',
+            relief='flat',
+            padx=18,
+            pady=6,
+            font=('Arial', 12, 'bold'),
+            cursor='hand2',
+        ).pack(side='right', padx=(8, 0))
+        tk.Button(
+            buttons,
+            text='ביטול',
+            command=cancel,
+            bg='#DDE6FF',
+            fg='#304BA8',
+            relief='flat',
+            padx=16,
+            pady=6,
+            font=('Arial', 12),
+            cursor='hand2',
+        ).pack(side='right')
+
+        win.protocol('WM_DELETE_WINDOW', cancel)
+        win.update_idletasks()
+        self._bring_window_to_front(win)
+
+    def show_first_run(self):
+        win = tk.Toplevel(self.root)
+        win.title('ברוכים הבאים · Keyboard Language Guard')
+        win.configure(bg='#F7F9FF')
+        win.resizable(False, False)
+
+        card = tk.Frame(win, bg='#F7F9FF', padx=24, pady=20)
+        card.pack(fill='both', expand=True)
+
+        tk.Label(
+            card,
+            text='ברוכים הבאים ל‑Keyboard Language Guard',
+            bg='#F7F9FF',
+            fg='#25304A',
+            font=('Arial', 16, 'bold'),
+        ).pack(anchor='e', pady=(0, 12))
+
+        message = (
+            'האפליקציה מזהה טקסט שהוקלד בפריסת המקלדת הלא נכונה '
+            '(עברית/אנגלית) ומציעה לתקן.\n\n'
+            'פרטיות: כל הניתוח מתבצע במחשב שלך בלבד. שום טקסט לא נשלח לשרת. '
+            'הקלדה בשדות סיסמה מתעלמים ממנה לחלוטין.\n\n'
+            'כדי לפעול, האפליקציה זקוקה להרשאות ב‑\n'
+            'System Settings → Privacy & Security:\n'
+            '  •  Accessibility (נגישות)\n'
+            '  •  Input Monitoring (ניטור קלט)\n\n'
+            'לאחר אישור ההרשאות, סגור והפעל מחדש את האפליקציה.'
+        )
+        tk.Label(
+            card,
+            text=message,
+            bg='#F7F9FF',
+            fg='#25304A',
+            font=('Arial', 12),
+            justify='right',
+            wraplength=440,
+        ).pack(anchor='e')
+
+        def acknowledge():
+            self.settings.first_run_completed = True
+            self._save_settings_safely()
+            win.destroy()
+
+        tk.Button(
+            card,
+            text='הבנתי, בוא נתחיל',
+            command=acknowledge,
+            bg='#4F6BED',
+            fg='white',
+            activebackground='#3F58C7',
+            activeforeground='white',
+            relief='flat',
+            padx=20,
+            pady=8,
+            font=('Arial', 12, 'bold'),
+            cursor='hand2',
+        ).pack(anchor='e', pady=(18, 0))
+
+        win.protocol('WM_DELETE_WINDOW', acknowledge)
+        win.update_idletasks()
+        self._bring_window_to_front(win)
 
     def _configure_as_background_app(self):
         """On macOS, keep Python/Tk out of the normal app-switching flow."""
@@ -207,7 +448,7 @@ class LanguageGuard:
         except Exception:
             return 80, 80
 
-    def _popup_geometry(self, anchor_x, anchor_y):
+    def _popup_geometry(self, anchor_x, anchor_y, popup_height=POPUP_HEIGHT):
         """Place the card below the caret, or above it near screen edges."""
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
@@ -215,9 +456,33 @@ class LanguageGuard:
         y = anchor_y + 18
         if x + POPUP_WIDTH > screen_w - 16:
             x = screen_w - POPUP_WIDTH - 16
-        if y + POPUP_HEIGHT > screen_h - 24:
-            y = anchor_y - POPUP_HEIGHT - 18
+        if y + popup_height > screen_h - 24:
+            y = anchor_y - popup_height - 18
         return max(12, x), max(12, y)
+
+    @staticmethod
+    def _wrap_to_width(text, font, max_width):
+        """Greedy word-wrap keeping each line within max_width pixels.
+
+        We wrap manually and render each resulting line as its own
+        single-line label, because Tk mis-orders right-to-left text when it
+        performs its own line wrapping.
+        """
+        words = text.split()
+        if not words:
+            return [text]
+        lines = []
+        current = ''
+        for word in words:
+            candidate = word if not current else f'{current} {word}'
+            if not current or font.measure(candidate) <= max_width:
+                current = candidate
+            else:
+                lines.append(current)
+                current = word
+        if current:
+            lines.append(current)
+        return lines
 
     def _keep_popup_above(self, win):
         """Keep the suggestion visible above the active editor on macOS."""
@@ -253,10 +518,14 @@ class LanguageGuard:
     def run(self):
         self.listener.start()
         print('Keyboard Language Guard is running. Press Ctrl+C in this terminal to quit.')
+        if not self.settings.first_run_completed:
+            self.root.after(300, self.show_first_run)
         self.root.mainloop()
 
-    def schedule_check(self, delay_ms=IDLE_CHECK_MS):
+    def schedule_check(self, delay_ms=None):
         """Debounce checks: only the latest pause in typing may trigger detection."""
+        if delay_ms is None:
+            delay_ms = self.settings.idle_check_ms
         with self.lock:
             self.pending_check_id += 1
             check_id = self.pending_check_id
@@ -271,6 +540,15 @@ class LanguageGuard:
         threading.Thread(target=wait_then_check, daemon=True).start()
 
     def on_press(self, key):
+        # Never capture keystrokes typed into a password field. Checked outside
+        # the lock so the Accessibility query does not block other callbacks.
+        if self.enabled and self.settings.ignore_secure_fields and self.is_mac:
+            if is_secure_field_focused():
+                with self.lock:
+                    self.buffer = ''
+                    self.pending_check_id += 1
+                return
+
         with self.lock:
             if self.suppress_input or not self.enabled:
                 return
@@ -280,7 +558,7 @@ class LanguageGuard:
                 return
             if key in (keyboard.Key.enter, keyboard.Key.tab):
                 self.buffer += '\n' if key == keyboard.Key.enter else '\t'
-                self.schedule_check(ENTER_CHECK_MS)
+                self.schedule_check(self.settings.enter_check_ms)
                 return
             if key == keyboard.Key.space:
                 self.buffer += ' '
@@ -300,7 +578,11 @@ class LanguageGuard:
 
             self.buffer += ch
             self.buffer = self.buffer[-MAX_BUFFER:]
-            delay = PUNCTUATION_CHECK_MS if ch in '.?!;:' else IDLE_CHECK_MS
+            delay = (
+                self.settings.punctuation_check_ms
+                if ch in '.?!;:'
+                else self.settings.idle_check_ms
+            )
             self.schedule_check(delay)
 
     def candidate_segment(self, text):
@@ -312,14 +594,18 @@ class LanguageGuard:
 
     def maybe_check(self):
         with self.lock:
-            if self.alert_open or time.time() - self.last_alert_at < COOLDOWN_SECONDS:
+            if self.alert_open or time.time() - self.last_alert_at < self.settings.cooldown_seconds:
                 return
             snapshot = self.buffer
             segment = self.candidate_segment(snapshot)
 
-        if len(segment) < MIN_CHECK_CHARS:
+        if len(segment) < self.settings.min_check_chars:
             return
-        detection = detect_wrong_layout(segment)
+        detection = detect_wrong_layout(
+            segment,
+            min_chars=self.settings.min_check_chars,
+            threshold=self.settings.detection_threshold,
+        )
         if not detection:
             return
 
@@ -335,15 +621,13 @@ class LanguageGuard:
         self.root.after(0, lambda d=detection: self.show_alert(d))
 
     def show_alert(self, detection):
-        anchor_x, anchor_y = self._caret_screen_position()
-        popup_x, popup_y = self._popup_geometry(anchor_x, anchor_y)
-
         win = tk.Toplevel(self.root, takefocus=False)
         win.title('Keyboard Language Guard Suggestion')
         win.attributes('-topmost', True)
         win.resizable(False, False)
         win.overrideredirect(True)
-        win.geometry(f'{POPUP_WIDTH}x{POPUP_HEIGHT}+{popup_x}+{popup_y}')
+        # Width is fixed; the final height is set once the content (which may
+        # wrap onto several lines) has been laid out, further below.
         win.configure(bg='#D9E5FF')
 
         # A tool-style window is less likely to activate the Python process.
@@ -382,22 +666,29 @@ class LanguageGuard:
             font=('Arial', 13, 'bold'),
         ).pack(side='right')
 
-        preview = tk.Text(
-            card,
-            height=3,
-            wrap='word',
-            takefocus=False,
-            relief='flat',
-            borderwidth=0,
-            bg='#EAF0FF',
-            fg='#17213A',
-            font=('Arial', 14),
-            padx=10,
-            pady=8,
+        # Show the correction as non-interactive labels — one per line — so it
+        # can never be clicked/edited. We wrap the text ourselves and render
+        # each line separately, because Tk mis-orders right-to-left text when
+        # it wraps internally, which scrambled the Hebrew letters.
+        preview_font = tkfont.Font(family='Arial', size=14)
+        preview_lines = self._wrap_to_width(
+            detection.converted, preview_font, POPUP_WIDTH - 90
         )
-        preview.insert('1.0', detection.converted)
-        preview.configure(state='disabled')
-        preview.pack(fill='x', pady=(12, 12))
+        preview_box = tk.Frame(card, bg='#EAF0FF')
+        preview_box.pack(fill='x', pady=(12, 12))
+        for line in preview_lines:
+            tk.Label(
+                preview_box,
+                text=line,
+                takefocus=0,
+                relief='flat',
+                borderwidth=0,
+                bg='#EAF0FF',
+                fg='#17213A',
+                font=preview_font,
+                anchor='e',
+                padx=10,
+            ).pack(side='top', fill='x', padx=6, pady=(4, 4))
 
         buttons = tk.Frame(card, bg='#F7F9FF')
         buttons.pack(fill='x')
@@ -470,6 +761,14 @@ class LanguageGuard:
             cursor='hand2',
         ).pack(side='left')
         win.protocol('WM_DELETE_WINDOW', ignore)
+
+        # Size the window to its content (height grows with wrapped lines),
+        # then place it near the caret without overflowing the screen edges.
+        win.update_idletasks()
+        height = max(POPUP_HEIGHT, win.winfo_reqheight())
+        anchor_x, anchor_y = self._caret_screen_position()
+        popup_x, popup_y = self._popup_geometry(anchor_x, anchor_y, height)
+        win.geometry(f'{POPUP_WIDTH}x{height}+{popup_x}+{popup_y}')
 
         win.update_idletasks()
         self._keep_popup_above(win)

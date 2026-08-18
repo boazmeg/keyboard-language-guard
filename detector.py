@@ -65,10 +65,21 @@ def language_score(text: str, lang: str) -> float:
     return _fallback_score(text, lang)
 
 
-def detect_wrong_layout(text: str, min_chars: int = 8, threshold: float = 2.2) -> Detection | None:
+def detect_wrong_layout(
+    text: str,
+    min_chars: int = 8,
+    threshold: float = 2.2,
+    min_words: int = 2,
+    min_target_score: float = 2.5,
+) -> Detection | None:
     clean = text.strip()
     if len(clean) < min_chars:
         return None
+
+    # A single word is too ambiguous to correct confidently; wait for more.
+    if len(_words(clean)) < min_words:
+        return None
+
     d = direction(clean)
     if not d:
         return None
@@ -86,8 +97,13 @@ def detect_wrong_layout(text: str, min_chars: int = 8, threshold: float = 2.2) -
     dst = language_score(converted, target_lang)
     gap = dst - src
 
-    # Require the converted text to be meaningfully more language-like.
+    # Require the converted text to be meaningfully more language-like...
     if gap < threshold:
+        return None
+
+    # ...and to clear an absolute floor, so two low-scoring gibberish strings
+    # with a small gap between them never trigger a suggestion.
+    if dst < min_target_score:
         return None
 
     # Squash to a useful 0..1 display confidence rather than pretending this is calibrated probability.
